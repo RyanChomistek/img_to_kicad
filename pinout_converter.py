@@ -80,6 +80,50 @@ class Pin:
             self.electrical_type = "unspecified"
 
 
+VALID_PACKAGE_TYPES = (
+    "DIP", "SOIC", "SSOP", "SOP", "TSSOP",
+    "QFP", "TQFP", "LQFP",
+    "QFN", "DFN",
+    "BGA",
+    "SOT",
+    "OTHER",
+)
+
+VALID_PAD_SHAPES = ("rect", "oval", "circle", "roundrect")
+VALID_PAD_TYPES = ("smd", "thru_hole")
+
+# Dual-row package types (pins on left and right sides)
+DUAL_ROW_TYPES = ("DIP", "SOIC", "SSOP", "SOP", "TSSOP", "SOT", "DFN")
+# Quad package types (pins on all four sides)
+QUAD_TYPES = ("QFP", "TQFP", "LQFP", "QFN")
+
+
+@dataclass
+class Package:
+    package_type: str = "DIP"
+    pin_count: int = 8
+    pin_pitch: float = 2.54
+    pad_width: float = 1.6
+    pad_height: float = 1.6
+    row_spacing: float = 7.62
+    body_width: float = 6.35
+    body_height: float = 9.27
+    pad_shape: str = "oval"
+    pad_type: str = "thru_hole"
+    drill_size: float = 1.0
+    thermal_pad: bool = False
+    thermal_pad_width: float = 0.0
+    thermal_pad_height: float = 0.0
+
+    def __post_init__(self):
+        if self.package_type not in VALID_PACKAGE_TYPES:
+            self.package_type = "OTHER"
+        if self.pad_shape not in VALID_PAD_SHAPES:
+            self.pad_shape = "oval"
+        if self.pad_type not in VALID_PAD_TYPES:
+            self.pad_type = "thru_hole"
+
+
 # ---------------------------------------------------------------------------
 # Image / PDF loading
 # ---------------------------------------------------------------------------
@@ -150,7 +194,8 @@ def get_pdf_page_count(pdf_path: str) -> int:
 # ---------------------------------------------------------------------------
 
 EXTRACTION_PROMPT = """\
-You are analyzing an image of an IC/component pinout diagram. Extract ALL pins shown in the diagram.
+You are analyzing an image of an IC/component pinout diagram. Extract ALL pins shown in the diagram
+AND infer the physical package type and dimensions.
 
 Return a JSON object with this exact structure (no markdown fencing, just raw JSON):
 {
@@ -163,10 +208,26 @@ Return a JSON object with this exact structure (no markdown fencing, just raw JS
       "type": "power_in",
       "position": 1
     }
-  ]
+  ],
+  "package": {
+    "package_type": "DIP",
+    "pin_count": 8,
+    "pin_pitch": 2.54,
+    "pad_width": 1.6,
+    "pad_height": 1.6,
+    "row_spacing": 7.62,
+    "body_width": 6.35,
+    "body_height": 9.27,
+    "pad_shape": "oval",
+    "pad_type": "thru_hole",
+    "drill_size": 1.0,
+    "thermal_pad": false,
+    "thermal_pad_width": 0.0,
+    "thermal_pad_height": 0.0
+  }
 }
 
-Rules:
+Pin rules:
 - "number": The pin number as a string. Use the number shown in the diagram.
 - "name": The pin name/label exactly as shown.
 - "side": Which side of the IC body the pin is on. One of: "left", "right", "top", "bottom".
@@ -185,19 +246,61 @@ Rules:
   pin number order. Pins must appear in the generated symbol at the same relative
   positions they occupy in the diagram.
 
+Package rules:
+- "package_type": One of "DIP", "SOIC", "SSOP", "SOP", "TSSOP", "QFP", "TQFP", "LQFP",
+  "QFN", "DFN", "BGA", "SOT", "OTHER". Infer from visual cues:
+  - DIP: through-hole, wide body, notch at top
+  - SOIC/SSOP/SOP/TSSOP: narrow body, gull-wing SMD leads on two sides
+  - QFP/TQFP/LQFP: gull-wing leads on all four sides
+  - QFN/DFN: no-lead, pads underneath on sides, often has exposed thermal pad
+  - BGA: ball grid array underneath
+  - SOT: small outline transistor (3-8 pins)
+- "pin_pitch": mm between adjacent pad centers. Common values:
+  DIP=2.54, SOIC=1.27, SSOP/TSSOP=0.65, QFP=0.5/0.65/0.8, QFN=0.5/0.65
+- "pad_width"/"pad_height": pad dimensions in mm
+- "row_spacing": center-to-center distance between opposing pad rows in mm
+- "body_width"/"body_height": silkscreen body outline in mm
+- "pad_shape": "rect", "oval", "circle", or "roundrect"
+- "pad_type": "smd" for surface mount, "thru_hole" for through-hole (DIP)
+- "drill_size": drill diameter in mm (only for thru_hole, 0 for SMD)
+- "thermal_pad": true if the package has an exposed/thermal pad (common in QFN)
+- "thermal_pad_width"/"thermal_pad_height": size of thermal pad in mm (0 if none)
+
 Important:
 - Extract EVERY pin visible in the diagram. Do not skip any.
 - The position values are CRITICAL: they must match the visual layout in the image.
   Look carefully at the vertical/horizontal arrangement of each pin on its side.
 - If the diagram shows a chip from the top, left side pins typically have low numbers.
+- Use standard package dimensions when possible. If uncertain, estimate conservatively.
 - Return ONLY valid JSON. No explanation, no markdown code fences.
 """
 
 
+def _parse_package(data: dict, pin_count: int) -> Package:
+    """Parse package dict from Claude response into a Package instance with defaults."""
+    pkg_data = data.get("package", {})
+    return Package(
+        package_type=pkg_data.get("package_type", "DIP"),
+        pin_count=pin_count,
+        pin_pitch=float(pkg_data.get("pin_pitch", 2.54)),
+        pad_width=float(pkg_data.get("pad_width", 1.6)),
+        pad_height=float(pkg_data.get("pad_height", 1.6)),
+        row_spacing=float(pkg_data.get("row_spacing", 7.62)),
+        body_width=float(pkg_data.get("body_width", 6.35)),
+        body_height=float(pkg_data.get("body_height", 9.27)),
+        pad_shape=pkg_data.get("pad_shape", "oval"),
+        pad_type=pkg_data.get("pad_type", "thru_hole"),
+        drill_size=float(pkg_data.get("drill_size", 1.0)),
+        thermal_pad=bool(pkg_data.get("thermal_pad", False)),
+        thermal_pad_width=float(pkg_data.get("thermal_pad_width", 0.0)),
+        thermal_pad_height=float(pkg_data.get("thermal_pad_height", 0.0)),
+    )
+
+
 def extract_pins_with_claude(
     image_b64: str, media_type: str, api_key: str | None = None
-) -> tuple[str, list[Pin]]:
-    """Send image to Claude Vision API and extract pin information."""
+) -> tuple[str, list[Pin], Package]:
+    """Send image to Claude Vision API and extract pin + package information."""
     client = anthropic.Anthropic(api_key=api_key)
 
     print("Sending image to Claude Vision API for analysis...")
@@ -259,7 +362,9 @@ def extract_pins_with_claude(
             for i, p in enumerate(side_pins, 1):
                 p.position = i
 
-    return component_name, pins
+    package = _parse_package(data, len(pins))
+
+    return component_name, pins, package
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +504,118 @@ def interactive_review(component_name: str, pins: list[Pin]) -> tuple[str, list[
             print("Unknown option.")
 
 
+def print_package_table(pkg: Package):
+    """Print package parameters in a readable format."""
+    print(f"\n  Package type:      {pkg.package_type}")
+    print(f"  Pin count:         {pkg.pin_count}")
+    print(f"  Pin pitch:         {pkg.pin_pitch} mm")
+    print(f"  Pad size:          {pkg.pad_width} x {pkg.pad_height} mm")
+    print(f"  Row spacing:       {pkg.row_spacing} mm")
+    print(f"  Body size:         {pkg.body_width} x {pkg.body_height} mm")
+    print(f"  Pad shape:         {pkg.pad_shape}")
+    print(f"  Pad type:          {pkg.pad_type}")
+    if pkg.pad_type == "thru_hole":
+        print(f"  Drill size:        {pkg.drill_size} mm")
+    print(f"  Thermal pad:       {'Yes' if pkg.thermal_pad else 'No'}")
+    if pkg.thermal_pad:
+        print(f"  Thermal pad size:  {pkg.thermal_pad_width} x {pkg.thermal_pad_height} mm")
+    print()
+
+
+PACKAGE_FIELD_NAMES = [
+    ("package_type", "Package type", str),
+    ("pin_pitch", "Pin pitch (mm)", float),
+    ("pad_width", "Pad width (mm)", float),
+    ("pad_height", "Pad height (mm)", float),
+    ("row_spacing", "Row spacing (mm)", float),
+    ("body_width", "Body width (mm)", float),
+    ("body_height", "Body height (mm)", float),
+    ("pad_shape", "Pad shape (rect/oval/circle/roundrect)", str),
+    ("pad_type", "Pad type (smd/thru_hole)", str),
+    ("drill_size", "Drill size (mm)", float),
+]
+
+
+def interactive_footprint_review(pkg: Package) -> Package:
+    """Let the user review and edit extracted package parameters."""
+    print("\nFootprint parameters (extracted from image):")
+    print_package_table(pkg)
+
+    while True:
+        print("Footprint options:")
+        print("  [a] Accept footprint parameters")
+        print("  [e] Edit a parameter")
+        print("  [t] Toggle thermal pad on/off")
+        print("  [p] Print parameters again")
+        print("  [s] Skip footprint generation")
+
+        choice = input("\nChoice: ").strip().lower()
+
+        if choice == "a":
+            return pkg
+
+        elif choice == "e":
+            print("\nEditable fields:")
+            for i, (field, label, _) in enumerate(PACKAGE_FIELD_NAMES):
+                val = getattr(pkg, field)
+                print(f"  [{i}] {label}: {val}")
+            try:
+                idx = int(input("Field number to edit: "))
+                if idx < 0 or idx >= len(PACKAGE_FIELD_NAMES):
+                    print(f"Invalid index. Must be 0-{len(PACKAGE_FIELD_NAMES)-1}")
+                    continue
+            except ValueError:
+                print("Invalid input.")
+                continue
+
+            field, label, typ = PACKAGE_FIELD_NAMES[idx]
+            current = getattr(pkg, field)
+            new_val = input(f"  {label} [{current}]: ").strip()
+            if new_val:
+                try:
+                    converted = typ(new_val)
+                    # Validate specific fields
+                    if field == "package_type":
+                        converted = converted.upper()
+                        if converted not in VALID_PACKAGE_TYPES:
+                            print(f"  Invalid package type. Valid: {', '.join(VALID_PACKAGE_TYPES)}")
+                            continue
+                    elif field == "pad_shape" and converted not in VALID_PAD_SHAPES:
+                        print(f"  Invalid pad shape. Valid: {', '.join(VALID_PAD_SHAPES)}")
+                        continue
+                    elif field == "pad_type" and converted not in VALID_PAD_TYPES:
+                        print(f"  Invalid pad type. Valid: {', '.join(VALID_PAD_TYPES)}")
+                        continue
+                    setattr(pkg, field, converted)
+                    print("  Updated.")
+                except ValueError:
+                    print(f"  Invalid value for {label}.")
+            print_package_table(pkg)
+
+        elif choice == "t":
+            pkg.thermal_pad = not pkg.thermal_pad
+            if pkg.thermal_pad and pkg.thermal_pad_width == 0:
+                w = input("  Thermal pad width (mm): ").strip()
+                h = input("  Thermal pad height (mm): ").strip()
+                try:
+                    pkg.thermal_pad_width = float(w) if w else 3.0
+                    pkg.thermal_pad_height = float(h) if h else 3.0
+                except ValueError:
+                    pkg.thermal_pad_width = 3.0
+                    pkg.thermal_pad_height = 3.0
+            print(f"  Thermal pad: {'On' if pkg.thermal_pad else 'Off'}")
+            print_package_table(pkg)
+
+        elif choice == "p":
+            print_package_table(pkg)
+
+        elif choice == "s":
+            return None
+
+        else:
+            print("Unknown option.")
+
+
 # ---------------------------------------------------------------------------
 # KiCad symbol generation
 # ---------------------------------------------------------------------------
@@ -415,7 +632,7 @@ def _sanitize_name(name: str) -> str:
 
 
 def generate_kicad_symbol(
-    component_name: str, pins: list[Pin], output_path: str
+    component_name: str, pins: list[Pin], output_path: str, footprint_ref: str = ""
 ):
     """Generate a .kicad_sym file from the component name and pin list."""
     safe_name = _sanitize_name(component_name)
@@ -436,13 +653,20 @@ def generate_kicad_symbol(
     # Round up to nearest 2.54
     body_height = _round_to_grid(body_height)
 
-    # Body width: enough room for the widest horizontal side, and for pin names
-    # Estimate max pin name length for width
-    all_names = [p.name for p in pins if p.side in ("left", "right")]
-    max_name_len = max((len(n) for n in all_names), default=3)
-    name_width = max(max_name_len * FONT_SIZE * 0.7, BODY_MIN_WIDTH)
+    # Body width: must fit the longest left name + longest right name + gap
+    PIN_NAME_OFFSET = 1.016  # matches pin_names offset in symbol header
+    CHAR_WIDTH = FONT_SIZE * 0.7  # approximate character width at font size
+    GAP = 2.54  # minimum gap between left and right pin name text
+
+    left_names = [p.name for p in sides["left"]]
+    right_names = [p.name for p in sides["right"]]
+    max_left_len = max((len(n) for n in left_names), default=0)
+    max_right_len = max((len(n) for n in right_names), default=0)
+
+    # Width needed so left and right pin names don't overlap
+    names_width = (max_left_len + max_right_len) * CHAR_WIDTH + PIN_NAME_OFFSET * 2 + GAP
     horiz_width = max(max_horizontal * PIN_SPACING + PIN_SPACING, 5.08)
-    body_width = max(name_width, horiz_width)
+    body_width = max(names_width, horiz_width, BODY_MIN_WIDTH)
     body_width = _round_to_grid(body_width)
 
     half_w = body_width / 2
@@ -522,7 +746,7 @@ def generate_kicad_symbol(
         )
       )
     )
-    (property "Footprint" ""
+    (property "Footprint" "{footprint_ref}"
       (at 0 0 0)
       (effects
         (font
@@ -603,24 +827,260 @@ def _format_pin(pin: Pin, x: float, y: float, angle: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# KiCad footprint generation
+# ---------------------------------------------------------------------------
+
+COURTYARD_CLEARANCE = 0.25  # mm
+SILKSCREEN_WIDTH = 0.12  # mm
+FAB_WIDTH = 0.1  # mm
+COURTYARD_WIDTH = 0.05  # mm
+FP_FONT_SIZE = 1.0  # mm
+
+
+def generate_kicad_footprint(
+    component_name: str, pkg: Package, output_path: str
+):
+    """Generate a .kicad_mod footprint file from package parameters."""
+    import math
+
+    safe_name = _sanitize_name(component_name)
+    lines = []
+
+    def add(text: str):
+        lines.append(text)
+
+    add(f'(footprint "{safe_name}"')
+    add('  (version 20240108)')
+    add('  (generator "pinout_converter")')
+    add('  (layer "F.Cu")')
+    add(f'  (property "Reference" "REF**"')
+    add(f'    (at 0 {-pkg.body_height / 2 - 1.5:.4f} 0)')
+    add('    (layer "F.SilkS")')
+    add(f'    (effects (font (size {FP_FONT_SIZE} {FP_FONT_SIZE}) (thickness 0.15)))')
+    add('  )')
+    add(f'  (property "Value" "{safe_name}"')
+    add(f'    (at 0 {pkg.body_height / 2 + 1.5:.4f} 0)')
+    add('    (layer "F.Fab")')
+    add(f'    (effects (font (size {FP_FONT_SIZE} {FP_FONT_SIZE}) (thickness 0.15)))')
+    add('  )')
+
+    # Compute pad positions
+    pad_entries = []  # list of (number, x, y, angle)
+
+    pkg_upper = pkg.package_type.upper()
+
+    if pkg_upper == "BGA":
+        # BGA: grid arrangement with alphanumeric naming
+        cols = int(math.ceil(math.sqrt(pkg.pin_count)))
+        rows = int(math.ceil(pkg.pin_count / cols))
+        total_w = (cols - 1) * pkg.pin_pitch
+        total_h = (rows - 1) * pkg.pin_pitch
+        count = 0
+        for r in range(rows):
+            row_letter = chr(ord('A') + r)
+            for c in range(cols):
+                count += 1
+                if count > pkg.pin_count:
+                    break
+                x = -total_w / 2 + c * pkg.pin_pitch
+                y = -total_h / 2 + r * pkg.pin_pitch
+                pad_name = f"{row_letter}{c + 1}"
+                pad_entries.append((pad_name, x, y, 0))
+
+    elif pkg_upper in QUAD_TYPES:
+        # Quad: pins on all 4 sides
+        pps = pkg.pin_count // 4  # pins per side
+        remainder = pkg.pin_count % 4
+        # Distribute remainder to sides: left, bottom, right, top
+        side_counts = [pps] * 4
+        for i in range(remainder):
+            side_counts[i] += 1
+
+        half_rs = pkg.row_spacing / 2
+        pin_num = 1
+
+        # Left side: top to bottom
+        n = side_counts[0]
+        span = (n - 1) * pkg.pin_pitch
+        for i in range(n):
+            x = -half_rs
+            y = -span / 2 + i * pkg.pin_pitch
+            pad_entries.append((str(pin_num), x, y, 0))
+            pin_num += 1
+
+        # Bottom side: left to right
+        n = side_counts[1]
+        span = (n - 1) * pkg.pin_pitch
+        for i in range(n):
+            x = -span / 2 + i * pkg.pin_pitch
+            y = half_rs
+            pad_entries.append((str(pin_num), x, y, 90))
+            pin_num += 1
+
+        # Right side: bottom to top
+        n = side_counts[2]
+        span = (n - 1) * pkg.pin_pitch
+        for i in range(n):
+            x = half_rs
+            y = span / 2 - i * pkg.pin_pitch
+            pad_entries.append((str(pin_num), x, y, 0))
+            pin_num += 1
+
+        # Top side: right to left
+        n = side_counts[3]
+        span = (n - 1) * pkg.pin_pitch
+        for i in range(n):
+            x = span / 2 - i * pkg.pin_pitch
+            y = -half_rs
+            pad_entries.append((str(pin_num), x, y, 90))
+            pin_num += 1
+
+    else:
+        # Dual-row: DIP, SOIC, SSOP, SOP, TSSOP, SOT, DFN, OTHER
+        half_count = pkg.pin_count // 2
+        half_rs = pkg.row_spacing / 2
+        span = (half_count - 1) * pkg.pin_pitch
+
+        # Left column: pins 1..N/2 top to bottom
+        for i in range(half_count):
+            x = -half_rs
+            y = -span / 2 + i * pkg.pin_pitch
+            pad_entries.append((str(i + 1), x, y, 0))
+
+        # Right column: pins N/2+1..N bottom to top
+        for i in range(half_count):
+            x = half_rs
+            y = span / 2 - i * pkg.pin_pitch
+            pad_entries.append((str(half_count + i + 1), x, y, 0))
+
+        # Handle odd pin (e.g. SOT-23 with 3 pins): extra pin at bottom center
+        if pkg.pin_count % 2 == 1:
+            x = 0
+            y = span / 2 + pkg.pin_pitch
+            pad_entries.append((str(pkg.pin_count), x, y, 90))
+
+    # Write pad entries
+    layers_smd = '(layers "F.Cu" "F.Paste" "F.Mask")'
+    layers_th = '(layers "*.Cu" "*.Mask")'
+
+    for idx, (pad_num, x, y, angle) in enumerate(pad_entries):
+        pad_type = pkg.pad_type
+        shape = pkg.pad_shape
+
+        # Determine pad width/height based on angle
+        if angle == 90:
+            pw, ph = pkg.pad_height, pkg.pad_width
+        else:
+            pw, ph = pkg.pad_width, pkg.pad_height
+
+        layers = layers_th if pad_type == "thru_hole" else layers_smd
+        drill_str = f' (drill {pkg.drill_size:.4f})' if pad_type == "thru_hole" else ""
+
+        add(f'  (pad "{pad_num}" {pad_type} {shape}')
+        add(f'    (at {x:.4f} {y:.4f})')
+        add(f'    (size {pw:.4f} {ph:.4f})')
+        add(f'    {layers}{drill_str}')
+        add('  )')
+
+    # Thermal pad
+    if pkg.thermal_pad and pkg.thermal_pad_width > 0 and pkg.thermal_pad_height > 0:
+        add(f'  (pad "" smd rect')
+        add(f'    (at 0 0)')
+        add(f'    (size {pkg.thermal_pad_width:.4f} {pkg.thermal_pad_height:.4f})')
+        add(f'    {layers_smd}')
+        add('  )')
+
+    # Silkscreen outline with pin 1 marker
+    half_bw = pkg.body_width / 2
+    half_bh = pkg.body_height / 2
+
+    # Silkscreen rectangle
+    for x1, y1, x2, y2 in [
+        (-half_bw, -half_bh, half_bw, -half_bh),   # top
+        (half_bw, -half_bh, half_bw, half_bh),      # right
+        (half_bw, half_bh, -half_bw, half_bh),      # bottom
+        (-half_bw, half_bh, -half_bw, -half_bh),    # left
+    ]:
+        add(f'  (fp_line (start {x1:.4f} {y1:.4f}) (end {x2:.4f} {y2:.4f})')
+        add(f'    (stroke (width {SILKSCREEN_WIDTH}) (type solid)) (layer "F.SilkS"))')
+
+    # Pin 1 marker: small circle on silkscreen near pin 1
+    if pad_entries:
+        p1_x, p1_y = pad_entries[0][1], pad_entries[0][2]
+        marker_x = p1_x + (0.5 if p1_x < 0 else -0.5)
+        marker_y = p1_y
+        # Clamp marker inside body outline
+        marker_x = max(-half_bw + 0.5, min(half_bw - 0.5, marker_x))
+        marker_y = max(-half_bh + 0.5, min(half_bh - 0.5, marker_y))
+        add(f'  (fp_circle (center {marker_x:.4f} {marker_y:.4f}) (end {marker_x + 0.25:.4f} {marker_y:.4f})')
+        add(f'    (stroke (width {SILKSCREEN_WIDTH}) (type solid)) (fill solid) (layer "F.SilkS"))')
+
+    # Fabrication layer outline
+    for x1, y1, x2, y2 in [
+        (-half_bw, -half_bh, half_bw, -half_bh),
+        (half_bw, -half_bh, half_bw, half_bh),
+        (half_bw, half_bh, -half_bw, half_bh),
+        (-half_bw, half_bh, -half_bw, -half_bh),
+    ]:
+        add(f'  (fp_line (start {x1:.4f} {y1:.4f}) (end {x2:.4f} {y2:.4f})')
+        add(f'    (stroke (width {FAB_WIDTH}) (type solid)) (layer "F.Fab"))')
+
+    # Courtyard
+    cx = half_bw + COURTYARD_CLEARANCE
+    cy = half_bh + COURTYARD_CLEARANCE
+    # Extend courtyard to cover pads
+    if pad_entries:
+        all_x = [abs(e[1]) + pkg.pad_width / 2 for e in pad_entries]
+        all_y = [abs(e[2]) + pkg.pad_height / 2 for e in pad_entries]
+        cx = max(cx, max(all_x) + COURTYARD_CLEARANCE)
+        cy = max(cy, max(all_y) + COURTYARD_CLEARANCE)
+
+    for x1, y1, x2, y2 in [
+        (-cx, -cy, cx, -cy),
+        (cx, -cy, cx, cy),
+        (cx, cy, -cx, cy),
+        (-cx, cy, -cx, -cy),
+    ]:
+        add(f'  (fp_line (start {x1:.4f} {y1:.4f}) (end {x2:.4f} {y2:.4f})')
+        add(f'    (stroke (width {COURTYARD_WIDTH}) (type solid)) (layer "F.CrtYd"))')
+
+    add(')')
+
+    content = "\n".join(lines) + "\n"
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    print(f"\nKiCad footprint written to: {output_path}")
+    print(f"  Package: {pkg.package_type}-{pkg.pin_count}")
+    print(f"  Pads: {len(pad_entries)}")
+    print(f"  Body: {pkg.body_width:.2f} x {pkg.body_height:.2f} mm")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert a pinout diagram image to a KiCad .kicad_sym symbol file.",
+        description="Convert a pinout diagram image to KiCad .kicad_sym and .kicad_mod files.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
   python pinout_converter.py chip_pinout.png
   python pinout_converter.py datasheet.pdf --page 3
   python pinout_converter.py pinout.jpg --output my_chip.kicad_sym --name ATmega328P
+  python pinout_converter.py chip.png --no-footprint
+  python pinout_converter.py chip.png -fo custom_footprint.kicad_mod
 """,
     )
     parser.add_argument("input", help="Path to a pinout diagram image (PNG/JPG) or PDF")
     parser.add_argument(
         "-o", "--output", help="Output .kicad_sym file path (default: <component_name>.kicad_sym)"
+    )
+    parser.add_argument(
+        "-fo", "--footprint-output",
+        help="Output .kicad_mod file path (default: <component_name>.kicad_mod)",
     )
     parser.add_argument(
         "-n", "--name", help="Override the component name (default: auto-detected)"
@@ -634,7 +1094,12 @@ Examples:
     parser.add_argument(
         "--no-review",
         action="store_true",
-        help="Skip interactive review and generate symbol directly",
+        help="Skip interactive review and generate directly",
+    )
+    parser.add_argument(
+        "--no-footprint",
+        action="store_true",
+        help="Skip footprint (.kicad_mod) generation",
     )
 
     args = parser.parse_args()
@@ -661,8 +1126,8 @@ Examples:
         image_b64, media_type = load_image_as_base64(str(input_path))
         print(f"Image loaded: {input_path.name}")
 
-    # Extract pins using Claude Vision
-    component_name, pins = extract_pins_with_claude(
+    # Extract pins and package using Claude Vision
+    component_name, pins, package = extract_pins_with_claude(
         image_b64, media_type, api_key=args.api_key
     )
 
@@ -675,23 +1140,47 @@ Examples:
     if args.name:
         component_name = args.name
 
-    # Interactive review
+    # Interactive review of pins
     if not args.no_review:
         component_name, pins = interactive_review(component_name, pins)
     else:
         print(f"\nComponent: {component_name}")
         print(f"Extracted {len(pins)} pins (skipping review)")
 
-    # Determine output path
-    if args.output:
-        output_path = args.output
-    else:
-        safe = _sanitize_name(component_name)
-        output_path = f"{safe}.kicad_sym"
+    # Interactive review of footprint parameters
+    generate_fp = not args.no_footprint
+    if generate_fp and not args.no_review:
+        result = interactive_footprint_review(package)
+        if result is None:
+            generate_fp = False
+        else:
+            package = result
 
-    # Generate symbol
-    generate_kicad_symbol(component_name, pins, output_path)
-    print("\nDone! Open the .kicad_sym file in KiCad Symbol Editor to verify.")
+    safe = _sanitize_name(component_name)
+
+    # Determine footprint output path and reference
+    fp_ref = ""
+    if generate_fp:
+        if args.footprint_output:
+            fp_output_path = args.footprint_output
+        else:
+            fp_output_path = f"{safe}.kicad_mod"
+        fp_ref = safe
+
+    # Determine symbol output path
+    if args.output:
+        sym_output_path = args.output
+    else:
+        sym_output_path = f"{safe}.kicad_sym"
+
+    # Generate symbol (with footprint reference if applicable)
+    generate_kicad_symbol(component_name, pins, sym_output_path, footprint_ref=fp_ref)
+
+    # Generate footprint
+    if generate_fp:
+        generate_kicad_footprint(component_name, package, fp_output_path)
+
+    print("\nDone! Open the files in KiCad to verify.")
 
 
 if __name__ == "__main__":
