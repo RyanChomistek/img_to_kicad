@@ -1102,6 +1102,39 @@ Examples:
         help="Skip footprint (.kicad_mod) generation",
     )
 
+    # Footprint parameter overrides
+    fp_group = parser.add_argument_group("footprint overrides",
+        "Override extracted footprint parameters (applied on top of Claude's inference)")
+    fp_group.add_argument(
+        "--package-type", choices=[t.lower() for t in VALID_PACKAGE_TYPES],
+        help="Package type (e.g. dip, soic, qfp, qfn, bga)",
+    )
+    fp_group.add_argument("--pin-pitch", type=float, help="Pin pitch in mm")
+    fp_group.add_argument("--pad-width", type=float, help="Pad width in mm")
+    fp_group.add_argument("--pad-height", type=float, help="Pad height in mm")
+    fp_group.add_argument("--row-spacing", type=float, help="Row spacing (center-to-center) in mm")
+    fp_group.add_argument("--body-width", type=float, help="Body width in mm")
+    fp_group.add_argument("--body-height", type=float, help="Body height in mm")
+    fp_group.add_argument(
+        "--pad-shape", choices=VALID_PAD_SHAPES,
+        help="Pad shape (rect, oval, circle, roundrect)",
+    )
+    fp_group.add_argument(
+        "--pad-type", choices=VALID_PAD_TYPES,
+        help="Pad type (smd, thru_hole)",
+    )
+    fp_group.add_argument("--drill-size", type=float, help="Drill diameter in mm (thru_hole only)")
+    fp_group.add_argument(
+        "--thermal-pad", action="store_true", default=None,
+        help="Enable thermal/exposed pad",
+    )
+    fp_group.add_argument(
+        "--no-thermal-pad", action="store_true", default=None,
+        help="Disable thermal/exposed pad",
+    )
+    fp_group.add_argument("--thermal-pad-width", type=float, help="Thermal pad width in mm")
+    fp_group.add_argument("--thermal-pad-height", type=float, help="Thermal pad height in mm")
+
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -1139,6 +1172,36 @@ Examples:
     # Override component name if specified
     if args.name:
         component_name = args.name
+
+    # Apply CLI footprint overrides
+    if args.package_type is not None:
+        package.package_type = args.package_type.upper()
+    if args.pin_pitch is not None:
+        package.pin_pitch = args.pin_pitch
+    if args.pad_width is not None:
+        package.pad_width = args.pad_width
+    if args.pad_height is not None:
+        package.pad_height = args.pad_height
+    if args.row_spacing is not None:
+        package.row_spacing = args.row_spacing
+    if args.body_width is not None:
+        package.body_width = args.body_width
+    if args.body_height is not None:
+        package.body_height = args.body_height
+    if args.pad_shape is not None:
+        package.pad_shape = args.pad_shape
+    if args.pad_type is not None:
+        package.pad_type = args.pad_type
+    if args.drill_size is not None:
+        package.drill_size = args.drill_size
+    if args.thermal_pad:
+        package.thermal_pad = True
+    if args.no_thermal_pad:
+        package.thermal_pad = False
+    if args.thermal_pad_width is not None:
+        package.thermal_pad_width = args.thermal_pad_width
+    if args.thermal_pad_height is not None:
+        package.thermal_pad_height = args.thermal_pad_height
 
     # Interactive review of pins
     if not args.no_review:
