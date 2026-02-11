@@ -163,7 +163,3 @@ Generated footprints include:
 - Optional thermal/exposed pad
 
 The symbol's `Footprint` property is automatically linked to the generated footprint name.
-
-## License
-
-MIT
